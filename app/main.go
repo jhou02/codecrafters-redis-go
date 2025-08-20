@@ -8,11 +8,17 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Ensures gofmt doesn't remove the "net" and "os" imports in stage 1
 var _ = net.Listen
 var _ = os.Exit
+
+var (
+	store = make(map[string]string)
+	mu sync.RWMutex
+)
 
 func main() {
 	ln, err := net.Listen("tcp", ":6379")
@@ -72,7 +78,35 @@ func handleConnection(conn net.Conn) {
 				msg, _ := arr[1].(string)
 				// RESP Bulk String reply
 				conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(msg), msg)))
+			case "SET":
+				if len(arr) != 3 {
+					conn.Write([]byte("-ERR wrong number of arguments for 'set'\r\n"))
+					continue
+				}
+				key := arr[1].(string)
+				val := arr[2].(string)
 
+				mu.Lock()
+				store[key] = val
+				mu.Unlock()
+
+				conn.Write([]byte("+OK\r\n"))
+			case "GET":
+				if len(arr) != 2 {
+					conn.Write([]byte("-ERR wrong number of arguments for 'get'\r\n"))
+					continue
+				}
+				key := arr[1].(string)
+
+				mu.RLock()
+				val , ok := store[key]
+				mu.RUnlock()
+
+				if !ok {
+					conn.Write([]byte("$-1\r\n"))
+				} else {
+					conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(val), val)))
+				}
 			default:
 				conn.Write([]byte("-ERR unknown command '" + cmd + "'\r\n"))
 		}

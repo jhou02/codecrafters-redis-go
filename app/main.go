@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Ensures gofmt doesn't remove the "net" and "os" imports in stage 1
@@ -16,9 +17,14 @@ var _ = net.Listen
 var _ = os.Exit
 
 var (
-	store = make(map[string]string)
+	store = make(map[string]entry)
 	mu sync.RWMutex
 )
+
+type entry struct {
+	value string
+	expiresAt time.Time
+}
 
 func main() {
 	ln, err := net.Listen("tcp", ":6379")
@@ -79,15 +85,26 @@ func handleConnection(conn net.Conn) {
 				// RESP Bulk String reply
 				conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(msg), msg)))
 			case "SET":
-				if len(arr) != 3 {
+				if len(arr) < 3 {
 					conn.Write([]byte("-ERR wrong number of arguments for 'set'\r\n"))
 					continue
 				}
 				key := arr[1].(string)
 				val := arr[2].(string)
 
+				var expires time.Time
+
+				if len(arr) == 5 && strings.ToUpper(arr[3].(string)) == "PX" {
+					ms, err := strconv.Atoi(arr[4].(string))
+					if err != nil {
+						conn.Write([]byte("-ERR PX value is not an integer\r\n"))
+						continue
+					}
+					expires = time.Now().Add(time.Duration(ms) * time.Millisecond)
+				}
+
 				mu.Lock()
-				store[key] = val
+				store[key] = entry{value: val, expiresAt: expires}
 				mu.Unlock()
 
 				conn.Write([]byte("+OK\r\n"))
@@ -99,14 +116,23 @@ func handleConnection(conn net.Conn) {
 				key := arr[1].(string)
 
 				mu.RLock()
-				val , ok := store[key]
+				e, ok := store[key]
 				mu.RUnlock()
 
 				if !ok {
 					conn.Write([]byte("$-1\r\n"))
-				} else {
-					conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(val), val)))
+					continue
 				}
+
+				if !e.expiresAt.IsZero() && time.Now().After(e.expiresAt) {
+					mu.Lock()
+					delete(store, key)
+					mu.Unlock()
+					conn.Write([]byte("$-1\r\n"))
+					continue
+				}
+
+				conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(e.value), e.value)))
 			default:
 				conn.Write([]byte("-ERR unknown command '" + cmd + "'\r\n"))
 		}

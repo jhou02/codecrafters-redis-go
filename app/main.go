@@ -146,18 +146,26 @@ func handleConnection(conn net.Conn) {
 				if len(arr) < 2 {
 					conn.Write([]byte("-ERR not enough arguments for 'rpush'\r\n"))
 				}
+
 				key := arr[1].(string)
 				val := arr[2].(string)
 
-				l := list.New()
+				e, ok := store[key]
 
-				l.PushFront(val)
+				var l *list.List
+				if ok {
+					l = e.listVal
+				} else {
+					l = list.New()
+				}
+
+				l.PushBack(val)
 
 				mu.Lock()
 				store[key] = entry{listVal: l, kind: ListType}
 				mu.Unlock()
 				
-				conn.Write([]byte(":1\r\n"))
+				conn.Write([]byte(fmt.Sprintf(":%d\r\n", l.Len())))
 			default:
 				conn.Write([]byte("-ERR unknown command '" + cmd + "'\r\n"))
 		}

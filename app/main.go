@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"container/list"
 	"fmt"
 	"io"
 	"net"
@@ -21,8 +22,16 @@ var (
 	mu sync.RWMutex
 )
 
+type ValueType int
+const (
+	StringType ValueType = iota
+	ListType
+)
+
 type entry struct {
-	value string
+	kind ValueType
+	strVal string
+	listVal *list.List
 	expiresAt time.Time
 }
 
@@ -104,7 +113,7 @@ func handleConnection(conn net.Conn) {
 				}
 
 				mu.Lock()
-				store[key] = entry{value: val, expiresAt: expires}
+				store[key] = entry{strVal: val, expiresAt: expires}
 				mu.Unlock()
 
 				conn.Write([]byte("+OK\r\n"))
@@ -132,7 +141,23 @@ func handleConnection(conn net.Conn) {
 					continue
 				}
 
-				conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(e.value), e.value)))
+				conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(e.strVal), e.strVal)))
+			case "RPUSH":
+				if len(arr) < 2 {
+					conn.Write([]byte("-ERR not enough arguments for 'rpush'\r\n"))
+				}
+				key := arr[1].(string)
+				val := arr[2].(string)
+
+				l := list.New()
+
+				l.PushFront(val)
+
+				mu.Lock()
+				store[key] = entry{listVal: l, kind: ListType}
+				mu.Unlock()
+				
+				conn.Write([]byte(":1\r\n"))
 			default:
 				conn.Write([]byte("-ERR unknown command '" + cmd + "'\r\n"))
 		}

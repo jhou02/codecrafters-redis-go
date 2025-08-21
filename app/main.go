@@ -152,6 +152,7 @@ func handleConnection(conn net.Conn) {
 
 				e, ok := store[key]
 
+				mu.Lock()
 				var l *list.List
 				if ok {
 					l = e.listVal
@@ -161,7 +162,6 @@ func handleConnection(conn net.Conn) {
 
 				l.PushBack(val)
 
-				mu.Lock()
 				store[key] = entry{listVal: l, kind: ListType}
 				mu.Unlock()
 				

@@ -265,6 +265,35 @@ func handleConnection(conn net.Conn) {
 				for _, v := range values {
 					fmt.Fprintf(conn, "$%d\r\n%s\r\n", len(v), v)
 				}
+			case "LPOP":
+				if len(arr) < 2 {
+					conn.Write([]byte("-ERR not enough arguments for 'lpop'\r\n"))
+					continue
+				}
+
+				key := arr[1].(string)
+
+				mu.Lock()
+				e, ok := store[key]
+
+				if !ok {
+					mu.Unlock()
+					conn.Write([]byte("$-1\r\n"))
+					continue
+				}
+
+				l := e.listVal
+				front := l.Front()
+
+				if front == nil {
+					mu.Unlock()
+					conn.Write([]byte("$-1\r\n"))
+					continue
+				}
+
+				val := l.Remove(front).(string)
+				mu.Unlock()
+				conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(val), val)))
 			default:
 				conn.Write([]byte("-ERR unknown command '" + cmd + "'\r\n"))
 		}

@@ -169,6 +169,34 @@ func handleConnection(conn net.Conn) {
 				mu.Unlock()
 				
 				conn.Write([]byte(fmt.Sprintf(":%d\r\n", length)))
+			case "LPUSH":
+				if len(arr) < 2 {
+					conn.Write([]byte("-ERR not enough arguments for 'lpush'\r\n"))
+					continue
+				}
+
+				key := arr[1].(string)
+				values := arr[2:]
+
+				mu.Lock()
+				e, ok := store[key]
+
+				var l *list.List
+				if ok {
+					l = e.listVal
+				} else {
+					l = list.New()
+				}
+
+				for _, val := range values {
+					l.PushFront(val.(string))
+				}
+
+				store[key] = entry{listVal: l, kind: ListType}
+				length := l.Len()
+				mu.Unlock()
+
+				conn.Write([]byte(fmt.Sprintf(":%d\r\n", length)))
 			case "LRANGE":
 				if len(arr) < 4 {
 					conn.Write([]byte("*0\r\n"))

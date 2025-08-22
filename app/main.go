@@ -189,28 +189,24 @@ func handleConnection(conn net.Conn) {
 				}
 
 				l := e.listVal
-				if i1 >= l.Len() {
+				length := l.Len()
+
+				start, stop, ok := normalizeRange(i1, i2, length)
+				if !ok {
 					mu.Unlock()
 					conn.Write([]byte("*0\r\n"))
 					continue
 				}
-				if i2 >= l.Len() {
-					i2 = l.Len() - 1
-				}
-				if i1 > i2 {
-					mu.Unlock()
-					conn.Write([]byte("*0\r\n"))
-					continue
-				}
+
 
 				var values []string
 				idx := 0
 
 				for e:= l.Front(); e != nil; e = e.Next() {
-					if idx >=  i1 && idx <= i2 {
+					if idx >=  start && idx <= stop {
 						values = append(values, e.Value.(string))
 					}
-					if idx > i2 {
+					if idx > stop {
 						break
 					}
 					idx++
@@ -278,4 +274,28 @@ func ParseRESP(r *bufio.Reader) (interface{}, error) {
 		}
 
 	return nil, fmt.Errorf("unknown RESP prefix")
+}
+
+func normalizeRange(start, stop, length int) (int, int, bool) {
+	if start < 0 {
+        start = length + start
+    }
+
+    if stop < 0 {
+        stop = length + stop
+    }
+
+    if start < 0 {
+        start = 0
+    }
+
+    if stop >= length {
+        stop = length - 1
+    }
+
+    if start >= length || start > stop {
+        return 0, 0, false
+    }
+
+    return start, stop, true
 }

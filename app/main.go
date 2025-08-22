@@ -150,9 +150,8 @@ func handleConnection(conn net.Conn) {
 				key := arr[1].(string)
 				values := arr[2:]
 
-				e, ok := store[key]
-
 				mu.Lock()
+				e, ok := store[key]
 
 				var l *list.List
 				if ok {
@@ -170,6 +169,59 @@ func handleConnection(conn net.Conn) {
 				mu.Unlock()
 				
 				conn.Write([]byte(fmt.Sprintf(":%d\r\n", length)))
+			case "LRANGE":
+				if len(arr) < 4 {
+					conn.Write([]byte("*0\r\n"))
+					continue
+				}
+				
+				key := arr[1].(string)
+				i1, _ := strconv.Atoi(arr[2].(string))
+				i2, _ := strconv.Atoi(arr[3].(string))
+
+				mu.Lock()
+				e, ok := store[key]
+				
+				if !ok {
+					mu.Unlock()
+					conn.Write([]byte("*0\r\n"))
+					continue
+				}
+
+				l := e.listVal
+				if i1 >= l.Len() {
+					mu.Unlock()
+					conn.Write([]byte("*0\r\n"))
+					continue
+				}
+				if i2 >= l.Len() {
+					i2 = l.Len() - 1
+				}
+				if i1 > i2 {
+					mu.Unlock()
+					conn.Write([]byte("*0\r\n"))
+					continue
+				}
+
+				var values []string
+				idx := 0
+
+				for e:= l.Front(); e != nil; e = e.Next() {
+					if idx >=  i1 && idx <= i2 {
+						values = append(values, e.Value.(string))
+					}
+					if idx > i2 {
+						break
+					}
+					idx++
+				}
+
+				mu.Unlock()
+
+				fmt.Fprintf(conn, "*%d\r\n", len(values))
+				for _, v := range values {
+					fmt.Fprintf(conn, "$%d\r\n%s\r\n", len(v), v)
+				}
 			default:
 				conn.Write([]byte("-ERR unknown command '" + cmd + "'\r\n"))
 		}

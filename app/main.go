@@ -148,11 +148,12 @@ func handleConnection(conn net.Conn) {
 				}
 
 				key := arr[1].(string)
-				val := arr[2].(string)
+				values := arr[2:]
 
 				e, ok := store[key]
 
 				mu.Lock()
+
 				var l *list.List
 				if ok {
 					l = e.listVal
@@ -160,12 +161,15 @@ func handleConnection(conn net.Conn) {
 					l = list.New()
 				}
 
-				l.PushBack(val)
+				for _, val := range values {
+					l.PushBack(val.(string))
+				}
 
 				store[key] = entry{listVal: l, kind: ListType}
+				length := l.Len()
 				mu.Unlock()
 				
-				conn.Write([]byte(fmt.Sprintf(":%d\r\n", l.Len())))
+				conn.Write([]byte(fmt.Sprintf(":%d\r\n", length)))
 			default:
 				conn.Write([]byte("-ERR unknown command '" + cmd + "'\r\n"))
 		}

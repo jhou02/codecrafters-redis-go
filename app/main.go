@@ -270,30 +270,53 @@ func handleConnection(conn net.Conn) {
 					conn.Write([]byte("-ERR not enough arguments for 'lpop'\r\n"))
 					continue
 				}
-
 				key := arr[1].(string)
+				count := 1
+
+				if len(arr) >= 3 {
+					num, err := strconv.Atoi(arr[2].(string))
+
+					if err != nil || num <= 0 {
+						conn.Write([]byte("-ERR optional argument # of elements removed must be valid integer"))
+						continue
+					}
+					count = num
+				}
 
 				mu.Lock()
 				e, ok := store[key]
 
-				if !ok {
+				if !ok || e.listVal.Len() == 0{
 					mu.Unlock()
-					conn.Write([]byte("$-1\r\n"))
+					if count == 1 {
+						conn.Write([]byte("$-1\r\n"))
+					} else {
+						conn.Write([]byte("*0\r\n"))
+					}
 					continue
 				}
 
 				l := e.listVal
-				front := l.Front()
-
-				if front == nil {
-					mu.Unlock()
-					conn.Write([]byte("$-1\r\n"))
-					continue
+				removed := []string{}
+				for i := 0; i < count; i++ {
+					front := l.Front()
+					if front == nil {
+						break
+					}
+					val := l.Remove(front).(string)
+					removed = append (removed, val)
 				}
-
-				val := l.Remove(front).(string)
+				store[key] = e
 				mu.Unlock()
-				conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(val), val)))
+				
+				if count == 1 {
+					conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(removed[0]), removed[0])))
+				} else {
+					conn.Write([]byte(fmt.Sprintf("*%d\r\n", len(removed))))
+					for _, v := range removed {
+						conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(v), v)))
+					}
+				}
 			default:
 				conn.Write([]byte("-ERR unknown command '" + cmd + "'\r\n"))
 		}

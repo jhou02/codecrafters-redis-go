@@ -197,6 +197,25 @@ func handleConnection(conn net.Conn) {
 				mu.Unlock()
 
 				conn.Write([]byte(fmt.Sprintf(":%d\r\n", length)))
+			case "LLEN":
+				if len(arr) < 2 {
+					conn.Write([]byte("-ERR not enough arguments for 'llen'\r\n"))
+					continue
+				}
+				
+				key := arr[1].(string)
+
+				mu.Lock()
+
+				e, ok := store[key]
+				if !ok {
+					conn.Write([]byte(":0\r\n"))
+				}
+				length := e.listVal.Len()
+
+				mu.Unlock()
+
+				conn.Write([]byte(fmt.Sprintf(":%d\r\n", length)))
 			case "LRANGE":
 				if len(arr) < 4 {
 					conn.Write([]byte("*0\r\n"))

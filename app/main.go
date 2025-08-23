@@ -20,6 +20,7 @@ var _ = os.Exit
 var (
 	store = make(map[string]entry)
 	mu sync.RWMutex
+	cond = sync.NewCond(&mu)
 )
 
 type ValueType int
@@ -166,6 +167,8 @@ func handleConnection(conn net.Conn) {
 
 				store[key] = entry{listVal: l, kind: ListType}
 				length := l.Len()
+				
+				cond.Broadcast() // wake up all BLPOP waiters
 				mu.Unlock()
 				
 				conn.Write([]byte(fmt.Sprintf(":%d\r\n", length)))
@@ -194,6 +197,8 @@ func handleConnection(conn net.Conn) {
 
 				store[key] = entry{listVal: l, kind: ListType}
 				length := l.Len()
+				
+				cond.Broadcast() // wake up all BLPOP waiters
 				mu.Unlock()
 
 				conn.Write([]byte(fmt.Sprintf(":%d\r\n", length)))
@@ -244,7 +249,6 @@ func handleConnection(conn net.Conn) {
 					conn.Write([]byte("*0\r\n"))
 					continue
 				}
-
 
 				var values []string
 				idx := 0
@@ -307,6 +311,7 @@ func handleConnection(conn net.Conn) {
 					removed = append (removed, val)
 				}
 				store[key] = e
+
 				mu.Unlock()
 				
 				if count == 1 {
@@ -315,6 +320,51 @@ func handleConnection(conn net.Conn) {
 					conn.Write([]byte(fmt.Sprintf("*%d\r\n", len(removed))))
 					for _, v := range removed {
 						conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(v), v)))
+					}
+				}
+			case "BLPOP":
+				if len(arr) < 3 {
+					conn.Write([]byte("-ERR wrong number of arguments for 'blpop'\r\n"))
+					continue
+				}
+				key := arr[1].(string)
+				timeout, _ := strconv.Atoi(arr[2].(string))
+
+				mu.Lock()
+				for {
+					e, ok := store[key]
+					if ok && e.listVal.Len() > 0 {
+						l := e.listVal
+						front := l.Front()
+						val := l.Remove(front).(string)
+						store[key] = e
+						mu.Unlock()
+
+						// RESP array reply: [key, value]
+						fmt.Fprintf(conn, "*2\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n",
+							len(key), key, len(val), val)
+						break
+					}
+
+					if timeout == 0 {
+						// block indefinitely until broadcast
+						cond.Wait() // releases mu, reacquires on wakeup
+					} else {
+						// timed wait
+						done := make(chan struct{})
+						go func() {
+							cond.Wait()
+							close(done)
+						}()
+						mu.Unlock()
+						select {
+						case <-done:
+							mu.Lock()
+							continue
+						case <-time.After(time.Duration(timeout) * time.Second):
+							conn.Write([]byte("$-1\r\n"))
+							return
+						}
 					}
 				}
 			default:
@@ -397,4 +447,17 @@ func normalizeRange(start, stop, length int) (int, int, bool) {
     }
 
     return start, stop, true
+}
+
+func tryPop(keys []interface{}) (key, val string, ok bool) {
+    for _, k := range keys {
+        e, exists := store[k.(string)]
+        if exists && e.kind == ListType && e.listVal.Len() > 0 {
+            front := e.listVal.Front()
+            v := e.listVal.Remove(front).(string)
+            store[k.(string)] = e
+            return k.(string), v, true
+        }
+    }
+    return "", "", false
 }

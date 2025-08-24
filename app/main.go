@@ -13,26 +13,27 @@ import (
 	"time"
 )
 
-// Ensures gofmt doesn't remove the "net" and "os" imports in stage 1
+// Prevent unused imports removal
 var _ = net.Listen
 var _ = os.Exit
 
 var (
 	store = make(map[string]entry)
-	mu sync.RWMutex
-	cond = sync.NewCond(&mu)
+	mu    sync.RWMutex
+	cond  = sync.NewCond(&mu)
 )
 
 type ValueType int
+
 const (
 	StringType ValueType = iota
 	ListType
 )
 
 type entry struct {
-	kind ValueType
-	strVal string
-	listVal *list.List
+	kind      ValueType
+	strVal    string
+	listVal   *list.List
 	expiresAt time.Time
 }
 
@@ -67,311 +68,314 @@ func handleConnection(conn net.Conn) {
 			return
 		}
 
-		// We expect commands to be arrays like ["PING"]
 		arr, ok := val.([]interface{})
 		if !ok || len(arr) == 0 {
-			conn.Write([]byte("-ERR unknown command\r\n"))
+			writeError(conn, "unknown command")
 			continue
 		}
 
-		// Convert first element to string (the command)
-		cmd, _ := arr[0].(string)
-		cmd = strings.ToUpper(cmd)
+		cmd := strings.ToUpper(arr[0].(string))
 
 		switch cmd {
-			case "PING":
-				if len(arr) == 2 {
-					conn.Write([]byte("+" + arr[1].(string) + "\r\n"))
-				} else {
-					conn.Write([]byte("+PONG\r\n"))
-				}
+		case "PING":
+			if len(arr) == 2 {
+				writeSimpleString(conn, arr[1].(string))
+			} else {
+				writeSimpleString(conn, "PONG")
+			}
 
-			case "ECHO":
-				if len(arr) != 2 {
-					conn.Write([]byte("-ERR wrong number of arguments for 'echo' command\r\n"))
-					continue
-				}
-				msg, _ := arr[1].(string)
-				// RESP Bulk String reply
-				conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(msg), msg)))
-			case "SET":
-				if len(arr) < 3 {
-					conn.Write([]byte("-ERR wrong number of arguments for 'set'\r\n"))
-					continue
-				}
-				key := arr[1].(string)
-				val := arr[2].(string)
+		case "ECHO":
+			if len(arr) != 2 {
+				writeError(conn, "wrong number of arguments for 'echo'")
+				continue
+			}
+			writeBulkString(conn, arr[1].(string))
 
-				var expires time.Time
+		case "SET":
+			handleSet(conn, arr)
 
-				if len(arr) == 5 && strings.ToUpper(arr[3].(string)) == "PX" {
-					ms, err := strconv.Atoi(arr[4].(string))
-					if err != nil {
-						conn.Write([]byte("-ERR PX value is not an integer\r\n"))
-						continue
-					}
-					expires = time.Now().Add(time.Duration(ms) * time.Millisecond)
-				}
+		case "GET":
+			handleGet(conn, arr)
 
-				mu.Lock()
-				store[key] = entry{strVal: val, expiresAt: expires}
-				mu.Unlock()
+		case "RPUSH":
+			handlePush(conn, arr, false)
 
-				conn.Write([]byte("+OK\r\n"))
-			case "GET":
-				if len(arr) != 2 {
-					conn.Write([]byte("-ERR wrong number of arguments for 'get'\r\n"))
-					continue
-				}
-				key := arr[1].(string)
+		case "LPUSH":
+			handlePush(conn, arr, true)
 
-				mu.RLock()
-				e, ok := store[key]
-				mu.RUnlock()
+		case "LLEN":
+			handleLLen(conn, arr)
 
-				if !ok {
-					conn.Write([]byte("$-1\r\n"))
-					continue
-				}
+		case "LRANGE":
+			handleLRange(conn, arr)
 
-				if !e.expiresAt.IsZero() && time.Now().After(e.expiresAt) {
-					mu.Lock()
-					delete(store, key)
-					mu.Unlock()
-					conn.Write([]byte("$-1\r\n"))
-					continue
-				}
+		case "LPOP":
+			handleLPop(conn, arr)
 
-				conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(e.strVal), e.strVal)))
-			case "RPUSH":
-				if len(arr) < 2 {
-					conn.Write([]byte("-ERR not enough arguments for 'rpush'\r\n"))
-				}
+		case "BLPOP":
+			handleBLPop(conn, arr)
 
-				key := arr[1].(string)
-				values := arr[2:]
-
-				mu.Lock()
-				e, ok := store[key]
-
-				var l *list.List
-				if ok {
-					l = e.listVal
-				} else {
-					l = list.New()
-				}
-
-				for _, val := range values {
-					l.PushBack(val.(string))
-				}
-
-				store[key] = entry{listVal: l, kind: ListType}
-				length := l.Len()
-				
-				cond.Broadcast() // wake up all BLPOP waiters
-				mu.Unlock()
-				
-				conn.Write([]byte(fmt.Sprintf(":%d\r\n", length)))
-			case "LPUSH":
-				if len(arr) < 2 {
-					conn.Write([]byte("-ERR not enough arguments for 'lpush'\r\n"))
-					continue
-				}
-
-				key := arr[1].(string)
-				values := arr[2:]
-
-				mu.Lock()
-				e, ok := store[key]
-
-				var l *list.List
-				if ok {
-					l = e.listVal
-				} else {
-					l = list.New()
-				}
-
-				for _, val := range values {
-					l.PushFront(val.(string))
-				}
-
-				store[key] = entry{listVal: l, kind: ListType}
-				length := l.Len()
-				
-				cond.Broadcast() // wake up all BLPOP waiters
-				mu.Unlock()
-
-				conn.Write([]byte(fmt.Sprintf(":%d\r\n", length)))
-			case "LLEN":
-				if len(arr) < 2 {
-					conn.Write([]byte("-ERR not enough arguments for 'llen'\r\n"))
-					continue
-				}
-				
-				key := arr[1].(string)
-
-				mu.Lock()
-
-				e, ok := store[key]
-				if !ok {
-					conn.Write([]byte(":0\r\n"))
-				}
-				length := e.listVal.Len()
-
-				mu.Unlock()
-
-				conn.Write([]byte(fmt.Sprintf(":%d\r\n", length)))
-			case "LRANGE":
-				if len(arr) < 4 {
-					conn.Write([]byte("*0\r\n"))
-					continue
-				}
-				
-				key := arr[1].(string)
-				i1, _ := strconv.Atoi(arr[2].(string))
-				i2, _ := strconv.Atoi(arr[3].(string))
-
-				mu.Lock()
-				e, ok := store[key]
-				
-				if !ok {
-					mu.Unlock()
-					conn.Write([]byte("*0\r\n"))
-					continue
-				}
-
-				l := e.listVal
-				length := l.Len()
-
-				start, stop, ok := normalizeRange(i1, i2, length)
-				if !ok {
-					mu.Unlock()
-					conn.Write([]byte("*0\r\n"))
-					continue
-				}
-
-				var values []string
-				idx := 0
-
-				for e:= l.Front(); e != nil; e = e.Next() {
-					if idx >=  start && idx <= stop {
-						values = append(values, e.Value.(string))
-					}
-					if idx > stop {
-						break
-					}
-					idx++
-				}
-
-				mu.Unlock()
-
-				fmt.Fprintf(conn, "*%d\r\n", len(values))
-				for _, v := range values {
-					fmt.Fprintf(conn, "$%d\r\n%s\r\n", len(v), v)
-				}
-			case "LPOP":
-				if len(arr) < 2 {
-					conn.Write([]byte("-ERR not enough arguments for 'lpop'\r\n"))
-					continue
-				}
-				key := arr[1].(string)
-				count := 1
-
-				if len(arr) >= 3 {
-					num, err := strconv.Atoi(arr[2].(string))
-
-					if err != nil || num <= 0 {
-						conn.Write([]byte("-ERR optional argument # of elements removed must be valid integer"))
-						continue
-					}
-					count = num
-				}
-
-				mu.Lock()
-				e, ok := store[key]
-
-				if !ok || e.listVal.Len() == 0{
-					mu.Unlock()
-					if count == 1 {
-						conn.Write([]byte("$-1\r\n"))
-					} else {
-						conn.Write([]byte("*0\r\n"))
-					}
-					continue
-				}
-
-				l := e.listVal
-				removed := []string{}
-				for i := 0; i < count; i++ {
-					front := l.Front()
-					if front == nil {
-						break
-					}
-					val := l.Remove(front).(string)
-					removed = append (removed, val)
-				}
-				store[key] = e
-
-				mu.Unlock()
-				
-				if count == 1 {
-					conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(removed[0]), removed[0])))
-				} else {
-					conn.Write([]byte(fmt.Sprintf("*%d\r\n", len(removed))))
-					for _, v := range removed {
-						conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(v), v)))
-					}
-				}
-			case "BLPOP":
-				if len(arr) < 3 {
-					conn.Write([]byte("-ERR wrong number of arguments for 'blpop'\r\n"))
-					continue
-				}
-				key := arr[1].(string)
-				timeout, _ := strconv.Atoi(arr[2].(string))
-
-				mu.Lock()
-				for {
-					e, ok := store[key]
-					if ok && e.listVal.Len() > 0 {
-						l := e.listVal
-						front := l.Front()
-						val := l.Remove(front).(string)
-						store[key] = e
-						mu.Unlock()
-
-						// RESP array reply: [key, value]
-						fmt.Fprintf(conn, "*2\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n",
-							len(key), key, len(val), val)
-						break
-					}
-
-					if timeout == 0 {
-						// block indefinitely until broadcast
-						cond.Wait() // releases mu, reacquires on wakeup
-					} else {
-						// timed wait
-						done := make(chan struct{})
-						go func() {
-							cond.Wait()
-							close(done)
-						}()
-						mu.Unlock()
-						select {
-						case <-done:
-							mu.Lock()
-							continue
-						case <-time.After(time.Duration(timeout) * time.Second):
-							conn.Write([]byte("$-1\r\n"))
-							return
-						}
-					}
-				}
-			default:
-				conn.Write([]byte("-ERR unknown command '" + cmd + "'\r\n"))
+		default:
+			writeError(conn, fmt.Sprintf("unknown command '%s'", cmd))
 		}
 	}
 }
+
+func handleSet(conn net.Conn, arr []interface{}) {
+	if len(arr) < 3 {
+		writeError(conn, "wrong number of arguments for 'set'")
+		return
+	}
+	key := arr[1].(string)
+	val := arr[2].(string)
+	var expires time.Time
+
+	if len(arr) == 5 && strings.ToUpper(arr[3].(string)) == "PX" {
+		ms, err := strconv.Atoi(arr[4].(string))
+		if err != nil {
+			writeError(conn, "PX value is not an integer")
+			return
+		}
+		expires = time.Now().Add(time.Duration(ms) * time.Millisecond)
+	}
+
+	mu.Lock()
+	store[key] = entry{strVal: val, expiresAt: expires}
+	mu.Unlock()
+
+	writeSimpleString(conn, "OK")
+}
+
+func handleGet(conn net.Conn, arr []interface{}) {
+	if len(arr) != 2 {
+		writeError(conn, "wrong number of arguments for 'get'")
+		return
+	}
+	key := arr[1].(string)
+
+	mu.RLock()
+	e, ok := store[key]
+	mu.RUnlock()
+
+	if !ok {
+		writeNullBulk(conn)
+		return
+	}
+
+	if !e.expiresAt.IsZero() && time.Now().After(e.expiresAt) {
+		mu.Lock()
+		delete(store, key)
+		mu.Unlock()
+		writeNullBulk(conn)
+		return
+	}
+
+	writeBulkString(conn, e.strVal)
+}
+
+func handlePush(conn net.Conn, arr []interface{}, left bool) {
+	if len(arr) < 3 {
+		writeError(conn, fmt.Sprintf("not enough arguments for '%s'", strings.ToLower(arr[0].(string))))
+		return
+	}
+	key := arr[1].(string)
+	values := arr[2:]
+
+	mu.Lock()
+	n := pushToList(key, values, left)
+	cond.Broadcast()
+	mu.Unlock()
+
+	writeInteger(conn, n)
+}
+
+func pushToList(key string, values []interface{}, left bool) int {
+	e, ok := store[key]
+	var l *list.List
+	if ok {
+		l = e.listVal
+	} else {
+		l = list.New()
+	}
+	for _, val := range values {
+		if left {
+			l.PushFront(val.(string))
+		} else {
+			l.PushBack(val.(string))
+		}
+	}
+	store[key] = entry{listVal: l, kind: ListType}
+	return l.Len()
+}
+
+func handleLLen(conn net.Conn, arr []interface{}) {
+	if len(arr) < 2 {
+		writeError(conn, "not enough arguments for 'llen'")
+		return
+	}
+	key := arr[1].(string)
+
+	mu.RLock()
+	e, ok := store[key]
+	mu.RUnlock()
+
+	if !ok || e.listVal == nil {
+		writeInteger(conn, 0)
+		return
+	}
+
+	writeInteger(conn, e.listVal.Len())
+}
+
+func handleLRange(conn net.Conn, arr []interface{}) {
+	if len(arr) < 4 {
+		writeArray(conn, []string{})
+		return
+	}
+
+	key := arr[1].(string)
+	start, _ := strconv.Atoi(arr[2].(string))
+	stop, _ := strconv.Atoi(arr[3].(string))
+
+	mu.RLock()
+	e, ok := store[key]
+	mu.RUnlock()
+
+	if !ok || e.listVal == nil {
+		writeArray(conn, []string{})
+		return
+	}
+
+	l := e.listVal
+	length := l.Len()
+	start, stop, valid := normalizeRange(start, stop, length)
+	if !valid {
+		writeArray(conn, []string{})
+		return
+	}
+
+	values := make([]string, 0, stop-start+1)
+	idx := 0
+	for el := l.Front(); el != nil; el = el.Next() {
+		if idx >= start && idx <= stop {
+			values = append(values, el.Value.(string))
+		}
+		if idx > stop {
+			break
+		}
+		idx++
+	}
+
+	writeArray(conn, values)
+}
+
+func handleLPop(conn net.Conn, arr []interface{}) {
+	if len(arr) < 2 {
+		writeError(conn, "not enough arguments for 'lpop'")
+		return
+	}
+	key := arr[1].(string)
+	count := 1
+
+	if len(arr) >= 3 {
+		num, err := strconv.Atoi(arr[2].(string))
+		if err != nil || num <= 0 {
+			writeError(conn, "optional argument # of elements removed must be valid integer")
+			return
+		}
+		count = num
+	}
+
+	mu.Lock()
+	e, ok := store[key]
+	if !ok || e.listVal.Len() == 0 {
+		mu.Unlock()
+		if count == 1 {
+			writeNullBulk(conn)
+		} else {
+			writeArray(conn, []string{})
+		}
+		return
+	}
+
+	l := e.listVal
+	removed := []string{}
+	for i := 0; i < count; i++ {
+		front := l.Front()
+		if front == nil {
+			break
+		}
+		val := l.Remove(front).(string)
+		removed = append(removed, val)
+	}
+	store[key] = e
+	mu.Unlock()
+
+	if count == 1 {
+		writeBulkString(conn, removed[0])
+	} else {
+		writeArray(conn, removed)
+	}
+}
+
+func handleBLPop(conn net.Conn, arr []interface{}) {
+	if len(arr) < 3 {
+		writeError(conn, "wrong number of arguments for 'blpop'")
+		return
+	}
+
+	key := arr[1].(string)
+	timeoutSec, err := strconv.ParseFloat(arr[2].(string), 64)
+	if err != nil || timeoutSec < 0 {
+		writeError(conn, "invalid timeout")
+		return
+	}
+
+	var timer *time.Timer
+	var timedOut bool
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	for {
+		// Check if the list has data
+		e, ok := store[key]
+		if ok && e.listVal != nil && e.listVal.Len() > 0 {
+			l := e.listVal
+			front := l.Front()
+			val := l.Remove(front).(string)
+			store[key] = e
+			writeArray(conn, []string{key, val})
+			return
+		}
+
+		// Timeout = 0 means wait forever
+		if timeoutSec == 0 {
+			cond.Wait()
+			continue
+		}
+
+		// Setup timer once
+		if timer == nil {
+			timer = time.AfterFunc(time.Duration(timeoutSec*float64(time.Second)), func() {
+				mu.Lock()
+				timedOut = true
+				cond.Broadcast()
+				mu.Unlock()
+			})
+		}
+
+		// Wait to be woken by push or timeout
+		cond.Wait()
+
+		if timedOut {
+			writeNullBulk(conn)
+			return
+		}
+	}
+}
+
+// ================= RESP helpers =================
 
 func ParseRESP(r *bufio.Reader) (interface{}, error) {
 	prefix, err := r.ReadByte()
@@ -380,84 +384,91 @@ func ParseRESP(r *bufio.Reader) (interface{}, error) {
 	}
 
 	switch prefix {
-		case '+': // Simple String
-			line, _ := r.ReadString('\n')
-			return strings.TrimSuffix(line, "\r\n"), nil
-
-		case '-': // Error
-			line, _ := r.ReadString('\n')
-			return fmt.Errorf("%s", strings.TrimSuffix(line, "\r\n")), nil
-
-		case ':': // Integer
-			line, _ := r.ReadString('\n')
-			num, _ := strconv.ParseInt(strings.TrimSuffix(line, "\r\n"), 10, 64)
-			return num, nil
-
-		case '$': // Bulk String
-			line, _ := r.ReadString('\n')
-			length, _ := strconv.Atoi(strings.TrimSuffix(line, "\r\n"))
-			if length == -1 {
-				return nil, nil // Null bulk string
-			}
-			buf := make([]byte, length+2) // include \r\n
-			if _, err := io.ReadFull(r, buf); err != nil {
+	case '+': // Simple String
+		line, _ := r.ReadString('\n')
+		return strings.TrimSuffix(line, "\r\n"), nil
+	case '-': // Error
+		line, _ := r.ReadString('\n')
+		return fmt.Errorf("%s", strings.TrimSuffix(line, "\r\n")), nil
+	case ':': // Integer
+		line, _ := r.ReadString('\n')
+		num, _ := strconv.ParseInt(strings.TrimSuffix(line, "\r\n"), 10, 64)
+		return num, nil
+	case '$': // Bulk String
+		line, _ := r.ReadString('\n')
+		length, _ := strconv.Atoi(strings.TrimSuffix(line, "\r\n"))
+		if length == -1 {
+			return nil, nil
+		}
+		buf := make([]byte, length+2)
+		if _, err := io.ReadFull(r, buf); err != nil {
+			return nil, err
+		}
+		return string(buf[:length]), nil
+	case '*': // Array
+		line, _ := r.ReadString('\n')
+		count, _ := strconv.Atoi(strings.TrimSuffix(line, "\r\n"))
+		if count == -1 {
+			return nil, nil
+		}
+		arr := make([]interface{}, count)
+		for i := 0; i < count; i++ {
+			val, err := ParseRESP(r)
+			if err != nil {
 				return nil, err
 			}
-			return string(buf[:length]), nil
-
-		case '*': // Array
-			line, _ := r.ReadString('\n')
-			count, _ := strconv.Atoi(strings.TrimSuffix(line, "\r\n"))
-			if count == -1 {
-				return nil, nil // Null array
-			}
-			arr := make([]interface{}, count)
-			for i := 0; i < count; i++ {
-				val, err := ParseRESP(r)
-				if err != nil {
-					return nil, err
-				}
-				arr[i] = val
-			}
-			return arr, nil
+			arr[i] = val
 		}
+		return arr, nil
+	}
 
 	return nil, fmt.Errorf("unknown RESP prefix")
 }
 
 func normalizeRange(start, stop, length int) (int, int, bool) {
 	if start < 0 {
-        start = length + start
-    }
-
-    if stop < 0 {
-        stop = length + stop
-    }
-
-    if start < 0 {
-        start = 0
-    }
-
-    if stop >= length {
-        stop = length - 1
-    }
-
-    if start >= length || start > stop {
-        return 0, 0, false
-    }
-
-    return start, stop, true
+		start = length + start
+	}
+	if stop < 0 {
+		stop = length + stop
+	}
+	if start < 0 {
+		start = 0
+	}
+	if stop >= length {
+		stop = length - 1
+	}
+	if start >= length || start > stop {
+		return 0, 0, false
+	}
+	return start, stop, true
 }
 
-func tryPop(keys []interface{}) (key, val string, ok bool) {
-    for _, k := range keys {
-        e, exists := store[k.(string)]
-        if exists && e.kind == ListType && e.listVal.Len() > 0 {
-            front := e.listVal.Front()
-            v := e.listVal.Remove(front).(string)
-            store[k.(string)] = e
-            return k.(string), v, true
-        }
-    }
-    return "", "", false
+// ================= RESP Write Helpers =================
+
+func writeSimpleString(w io.Writer, s string) {
+	fmt.Fprintf(w, "+%s\r\n", s)
+}
+
+func writeBulkString(w io.Writer, s string) {
+	fmt.Fprintf(w, "$%d\r\n%s\r\n", len(s), s)
+}
+
+func writeInteger(w io.Writer, n int) {
+	fmt.Fprintf(w, ":%d\r\n", n)
+}
+
+func writeArray(w io.Writer, arr []string) {
+	fmt.Fprintf(w, "*%d\r\n", len(arr))
+	for _, s := range arr {
+		writeBulkString(w, s)
+	}
+}
+
+func writeNullBulk(w io.Writer) {
+	w.Write([]byte("$-1\r\n"))
+}
+
+func writeError(w io.Writer, msg string) {
+	fmt.Fprintf(w, "-ERR %s\r\n", msg)
 }

@@ -114,11 +114,24 @@ func handleConnection(conn net.Conn) {
 
 		case "BLPOP":
 			handleBLPop(conn, arr)
-
+		
+		case "SUBSCRIBE":
+			handleSubscribe(conn, arr)
 		default:
 			writeError(conn, fmt.Sprintf("unknown command '%s'", cmd))
 		}
 	}
+}
+
+func handleSubscribe(conn net.Conn, arr []interface{}) {
+	if len(arr) < 2 {
+		writeError(conn, "wrong number of arguments for 'subscribe'")
+		return
+	}
+	key := arr[1].(string)
+	i := 1
+
+	writeArray(conn, []interface{}{"subscribe", key, i})
 }
 
 func handleSet(conn net.Conn, arr []interface{}) {
@@ -229,7 +242,7 @@ func handleLLen(conn net.Conn, arr []interface{}) {
 
 func handleLRange(conn net.Conn, arr []interface{}) {
 	if len(arr) < 4 {
-		writeArray(conn, []string{})
+		writeArray(conn, []interface{}{})
 		return
 	}
 
@@ -242,7 +255,7 @@ func handleLRange(conn net.Conn, arr []interface{}) {
 	mu.RUnlock()
 
 	if !ok || e.listVal == nil {
-		writeArray(conn, []string{})
+		writeArray(conn, []interface{}{})
 		return
 	}
 
@@ -250,11 +263,11 @@ func handleLRange(conn net.Conn, arr []interface{}) {
 	length := l.Len()
 	start, stop, valid := normalizeRange(start, stop, length)
 	if !valid {
-		writeArray(conn, []string{})
+		writeArray(conn, []interface{}{})
 		return
 	}
 
-	values := make([]string, 0, stop-start+1)
+	values := make([]interface{}, 0, stop-start+1)
 	idx := 0
 	for el := l.Front(); el != nil; el = el.Next() {
 		if idx >= start && idx <= stop {
@@ -293,13 +306,13 @@ func handleLPop(conn net.Conn, arr []interface{}) {
 		if count == 1 {
 			writeNullBulk(conn)
 		} else {
-			writeArray(conn, []string{})
+			writeArray(conn, []interface{}{})
 		}
 		return
 	}
 
 	l := e.listVal
-	removed := []string{}
+	removed := []interface{}{}
 	for i := 0; i < count; i++ {
 		front := l.Front()
 		if front == nil {
@@ -312,7 +325,7 @@ func handleLPop(conn net.Conn, arr []interface{}) {
 	mu.Unlock()
 
 	if count == 1 {
-		writeBulkString(conn, removed[0])
+		writeBulkString(conn, removed[0].(string))
 	} else {
 		writeArray(conn, removed)
 	}
@@ -345,7 +358,7 @@ func handleBLPop(conn net.Conn, arr []interface{}) {
 			front := l.Front()
 			val := l.Remove(front).(string)
 			store[key] = e
-			writeArray(conn, []string{key, val})
+			writeArray(conn, []interface{}{key, val})
 			return
 		}
 
@@ -458,12 +471,25 @@ func writeInteger(w io.Writer, n int) {
 	fmt.Fprintf(w, ":%d\r\n", n)
 }
 
-func writeArray(w io.Writer, arr []string) {
-	fmt.Fprintf(w, "*%d\r\n", len(arr))
-	for _, s := range arr {
-		writeBulkString(w, s)
-	}
+func writeArray(conn net.Conn, arr []interface{}) {
+    fmt.Fprintf(conn, "*%d\r\n", len(arr))
+    for _, elem := range arr {
+        switch v := elem.(type) {
+        case string:
+            writeBulkString(conn, v)
+        case int:
+            writeInteger(conn, v)
+        case []byte:
+            writeBulkString(conn, string(v))
+        case nil:
+            fmt.Fprintf(conn, "$-1\r\n") // RESP null bulk string
+        default:
+            // fallback: encode as bulk string
+            writeBulkString(conn, fmt.Sprintf("%v", v))
+        }
+    }
 }
+
 
 func writeNullBulk(w io.Writer) {
 	w.Write([]byte("$-1\r\n"))

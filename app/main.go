@@ -21,6 +21,7 @@ var (
 	store = make(map[string]entry)
 	mu    sync.RWMutex
 	cond  = sync.NewCond(&mu)
+	subscriptions = make(map[net.Conn]map[string]struct{})
 )
 
 type ValueType int
@@ -124,14 +125,33 @@ func handleConnection(conn net.Conn) {
 }
 
 func handleSubscribe(conn net.Conn, arr []interface{}) {
-	if len(arr) < 2 {
-		writeError(conn, "wrong number of arguments for 'subscribe'")
-		return
-	}
-	key := arr[1].(string)
-	i := 1
+    if len(arr) < 2 {
+        writeError(conn, "wrong number of arguments for 'subscribe'")
+        return
+    }
 
-	writeArray(conn, []interface{}{"subscribe", key, i})
+    // Initialize subscription set for this client if missing
+    if _, ok := subscriptions[conn]; !ok {
+        subscriptions[conn] = make(map[string]struct{})
+    }
+
+    // Iterate over each channel name provided in the command
+    for i := 1; i < len(arr); i++ {
+        channel, ok := arr[i].(string)
+        if !ok {
+            writeError(conn, "channel name must be a string")
+            return
+        }
+
+        // Add channel to client’s subscription set (set semantics → no dupes)
+        subscriptions[conn][channel] = struct{}{}
+
+        // Current number of channels client is subscribed to
+        count := len(subscriptions[conn])
+
+        // RESP reply: ["subscribe", channel, count]
+        writeArray(conn, []interface{}{"subscribe", channel, count})
+    }
 }
 
 func handleSet(conn net.Conn, arr []interface{}) {
@@ -196,7 +216,7 @@ func handlePush(conn net.Conn, arr []interface{}, left bool) {
 
 	mu.Lock()
 	n := pushToList(key, values, left)
-	cond.Broadcast()
+	cond.Signal()
 	mu.Unlock()
 
 	writeInteger(conn, n)

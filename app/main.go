@@ -22,6 +22,7 @@ var (
 	mu    sync.RWMutex
 	cond  = sync.NewCond(&mu)
 	subscriptions = make(map[net.Conn]map[string]struct{})
+	subscribed    = make(map[net.Conn]bool)
 )
 
 type ValueType int
@@ -77,6 +78,21 @@ func handleConnection(conn net.Conn) {
 
 		cmd := strings.ToUpper(arr[0].(string))
 
+		mu.Lock()
+		inSubscribedMode := subscribed[conn]
+		mu.Unlock()
+
+		if inSubscribedMode {
+			switch cmd {
+			case "SUBSCRIBE":
+				handleSubscribe(conn, arr)
+				continue
+			default:
+				writeError(conn, fmt.Sprintf("can't execute '%s' in subscribed mode", strings.ToLower(cmd)))
+				continue
+			}
+		}
+
 		switch cmd {
 		case "PING":
 			if len(arr) == 2 {
@@ -130,28 +146,28 @@ func handleSubscribe(conn net.Conn, arr []interface{}) {
         return
     }
 
-    // Initialize subscription set for this client if missing
+	mu.Lock()
     if _, ok := subscriptions[conn]; !ok {
         subscriptions[conn] = make(map[string]struct{})
     }
 
-    // Iterate over each channel name provided in the command
+	subscribed[conn] = true
+
     for i := 1; i < len(arr); i++ {
         channel, ok := arr[i].(string)
         if !ok {
             writeError(conn, "channel name must be a string")
             return
         }
-
-        // Add channel to client’s subscription set (set semantics → no dupes)
+    
         subscriptions[conn][channel] = struct{}{}
 
-        // Current number of channels client is subscribed to
         count := len(subscriptions[conn])
 
-        // RESP reply: ["subscribe", channel, count]
         writeArray(conn, []interface{}{"subscribe", channel, count})
     }
+
+	mu.Unlock()
 }
 
 func handleSet(conn net.Conn, arr []interface{}) {

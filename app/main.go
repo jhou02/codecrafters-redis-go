@@ -87,6 +87,9 @@ func handleConnection(conn net.Conn) {
 			case "SUBSCRIBE":
 				handleSubscribe(conn, arr)
 				continue
+			case "PING":
+				writeArray(conn, []interface{}{"pong", ""})
+				continue
 			default:
 				writeError(conn, fmt.Sprintf("can't execute '%s' in subscribed mode", strings.ToLower(cmd)))
 				continue

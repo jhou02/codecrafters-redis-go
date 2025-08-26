@@ -156,17 +156,26 @@ func handlePublish(conn net.Conn, arr []interface{}) {
         writeError(conn, "channel name must be a string")
         return
     }
-	
+
+	message, ok := arr[2].(string)
+	if !ok {
+		writeError(conn, "message must be a string")
+	}
+
     mu.RLock()
-    count := 0
-    for _, chans := range subscriptions {
+	receivers := []net.Conn{}
+    for c, chans := range subscriptions {
         if _, subscribed := chans[channel]; subscribed {
-            count++
+            receivers = append(receivers, c)
         }
     }
     mu.RUnlock()
 
-    writeInteger(conn, count)
+	for _, c := range receivers {
+		writeArray(c, []interface{}{"message", channel, message})
+	}
+	
+    writeInteger(conn, len(receivers))
 }
 
 

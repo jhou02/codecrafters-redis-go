@@ -87,6 +87,9 @@ func handleConnection(conn net.Conn) {
 			case "SUBSCRIBE":
 				handleSubscribe(conn, arr)
 				continue
+			case "UNSUBSCRIBE":
+				handleUnsubscribe(conn, arr)
+				continue
 			case "PING":
 				writeArray(conn, []interface{}{"pong", ""})
 				continue
@@ -145,6 +148,44 @@ func handleConnection(conn net.Conn) {
 	}
 }
 
+func handleUnsubscribe(conn net.Conn, arr []interface{}) {
+    mu.Lock()
+    defer mu.Unlock()
+
+    chans, ok := subscriptions[conn]
+    if !ok {
+        subscriptions[conn] = make(map[string]struct{})
+        chans = subscriptions[conn]
+    }
+
+    if len(arr) == 1 {
+        for channel := range chans {
+            delete(chans, channel)
+            count := len(chans)
+            writeArray(conn, []interface{}{"unsubscribe", channel, count})
+        }
+        return
+    }
+
+    for i := 1; i < len(arr); i++ {
+        channel, ok := arr[i].(string)
+        if !ok {
+            writeError(conn, "channel name must be a string")
+            return
+        }
+
+        delete(chans, channel)
+
+        count := len(chans)
+        writeArray(conn, []interface{}{"unsubscribe", channel, count})
+    }
+
+    if len(chans) == 0 {
+        subscribed[conn] = false
+    }
+}
+
+
 func handlePublish(conn net.Conn, arr []interface{}) {
     if len(arr) < 3 {
         writeError(conn, "wrong number of arguments for 'publish'")
@@ -174,7 +215,7 @@ func handlePublish(conn net.Conn, arr []interface{}) {
 	for _, c := range receivers {
 		writeArray(c, []interface{}{"message", channel, message})
 	}
-	
+
     writeInteger(conn, len(receivers))
 }
 

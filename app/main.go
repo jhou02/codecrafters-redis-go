@@ -137,11 +137,38 @@ func handleConnection(conn net.Conn) {
 		
 		case "SUBSCRIBE":
 			handleSubscribe(conn, arr)
+		case "PUBLISH":
+				handlePublish(conn, arr)
 		default:
 			writeError(conn, fmt.Sprintf("unknown command '%s'", cmd))
 		}
 	}
 }
+
+func handlePublish(conn net.Conn, arr []interface{}) {
+    if len(arr) < 3 {
+        writeError(conn, "wrong number of arguments for 'publish'")
+        return
+    }
+
+    channel, ok := arr[1].(string)
+    if !ok {
+        writeError(conn, "channel name must be a string")
+        return
+    }
+	
+    mu.RLock()
+    count := 0
+    for _, chans := range subscriptions {
+        if _, subscribed := chans[channel]; subscribed {
+            count++
+        }
+    }
+    mu.RUnlock()
+
+    writeInteger(conn, count)
+}
+
 
 func handleSubscribe(conn net.Conn, arr []interface{}) {
     if len(arr) < 2 {

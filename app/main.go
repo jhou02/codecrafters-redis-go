@@ -87,6 +87,7 @@ func handleConnection(conn net.Conn) {
 		if inMultiMode {
 			switch cmd {
 			case "EXEC":
+				handleExec(conn, arr)
 				continue
 			default:
 				handleQueue(conn, arr)
@@ -168,6 +169,14 @@ func handleConnection(conn net.Conn) {
 			writeError(conn, fmt.Sprintf("unknown command '%s'", cmd))
 		}
 	}
+}
+
+func handleExec(conn net.Conn, arr []interface{}) {
+	mu.Lock()
+	multiMode[conn] = false
+	mu.Unlock()
+
+	writeArray(conn, []interface{}{})
 }
 
 func handleQueue(conn net.Conn, arr []interface{}) {

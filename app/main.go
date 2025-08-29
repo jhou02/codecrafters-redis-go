@@ -146,10 +146,17 @@ func handleConnection(conn net.Conn) {
 		
 		case "INCR":
 			handleIncr(conn, arr)
+
+		case "MULTI":
+			handleMulti(conn, arr)
 		default:
 			writeError(conn, fmt.Sprintf("unknown command '%s'", cmd))
 		}
 	}
+}
+
+func handleMulti(conn net.Conn, arr []interface{}) {
+	writeSimpleString(conn, "OK")
 }
 
 func handleIncr(conn net.Conn, arr []interface{}) {

@@ -166,7 +166,12 @@ func handleIncr(conn net.Conn, arr []interface{}) {
 
     mu.Lock()
 	defer mu.Unlock()
-    e := store[key]
+    e, ok := store[key]
+
+	if !ok {
+		store[key] = entry{strVal: "0", kind: StringType}
+		e = store[key]
+	}
 	
 	count, err := strconv.Atoi(e.strVal)
 
@@ -177,6 +182,7 @@ func handleIncr(conn net.Conn, arr []interface{}) {
 
 	count++
 	e.strVal = strconv.Itoa(count)
+	store[key] = e
 
 	writeInteger(conn, count)
 }

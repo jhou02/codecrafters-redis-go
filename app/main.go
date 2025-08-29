@@ -23,6 +23,7 @@ var (
 	cond  = sync.NewCond(&mu)
 	subscriptions = make(map[net.Conn]map[string]struct{})
 	subscribed    = make(map[net.Conn]bool)
+	multiMode = make(map[net.Conn]bool)
 )
 
 type ValueType int
@@ -80,7 +81,18 @@ func handleConnection(conn net.Conn) {
 
 		mu.Lock()
 		inSubscribedMode := subscribed[conn]
+		inMultiMode := multiMode[conn]
 		mu.Unlock()
+
+		if inMultiMode {
+			switch cmd {
+			case "EXEC":
+				continue
+			default:
+				handleQueue(conn, arr)
+				continue
+			}
+		}
 
 		if inSubscribedMode {
 			switch cmd {
@@ -149,13 +161,25 @@ func handleConnection(conn net.Conn) {
 
 		case "MULTI":
 			handleMulti(conn, arr)
+
+		case "EXEC":
+			writeError(conn, "EXEC without MULTI")
 		default:
 			writeError(conn, fmt.Sprintf("unknown command '%s'", cmd))
 		}
 	}
 }
 
+func handleQueue(conn net.Conn, arr []interface{}) {
+	writeSimpleString(conn, "QUEUED")
+}
+
 func handleMulti(conn net.Conn, arr []interface{}) {
+	
+	mu.Lock()
+	multiMode[conn] = true
+	mu.Unlock()
+
 	writeSimpleString(conn, "OK")
 }
 

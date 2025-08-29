@@ -176,7 +176,7 @@ func handleIncr(conn net.Conn, arr []interface{}) {
 	count, err := strconv.Atoi(e.strVal)
 
 	if err != nil {
-		writeError(conn, "value is not an integer")
+		writeError(conn, "value is not an integer or out of range")
 		return
 	}
 

@@ -140,12 +140,45 @@ func handleConnection(conn net.Conn) {
 		
 		case "SUBSCRIBE":
 			handleSubscribe(conn, arr)
+
 		case "PUBLISH":
-				handlePublish(conn, arr)
+			handlePublish(conn, arr)
+		
+		case "INCR":
+			handleIncr(conn, arr)
 		default:
 			writeError(conn, fmt.Sprintf("unknown command '%s'", cmd))
 		}
 	}
+}
+
+func handleIncr(conn net.Conn, arr []interface{}) {
+	if len(arr) != 2 {
+        writeError(conn, "wrong number of arguments for 'incr'")
+        return
+    }
+
+    key, ok := arr[1].(string)
+    if !ok {
+        writeError(conn, "key must be a string")
+        return
+    }
+
+    mu.Lock()
+	defer mu.Unlock()
+    e := store[key]
+	
+	count, err := strconv.Atoi(e.strVal)
+
+	if err != nil {
+		writeError(conn, "value is not an integer")
+		return
+	}
+
+	count++
+	e.strVal = strconv.Itoa(count)
+
+	writeInteger(conn, count)
 }
 
 func handleUnsubscribe(conn net.Conn, arr []interface{}) {

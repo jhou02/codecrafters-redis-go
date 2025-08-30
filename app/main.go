@@ -96,6 +96,9 @@ func handleConnection(conn net.Conn) {
 				case "EXEC":
 					handleExec(conn, arr)
 					continue
+				case "DISCARD":
+					handleDiscard(conn , arr)
+					continue
 				default:
 					handleQueue(conn, arr)
 					continue
@@ -123,77 +126,96 @@ func handleConnection(conn net.Conn) {
 	}
 }
 
+
 func dispatchCommand(conn net.Conn, arr []interface{}) {
 	if len(arr) == 0 {
 		writeError(conn, "empty command")
 		return
 	}
-
+	
 	cmd := strings.ToUpper(arr[0].(string))
-
+	
 	switch cmd {
-		case "PING":
-			if len(arr) == 2 {
-				writeSimpleString(conn, arr[1].(string))
+	case "PING":
+		if len(arr) == 2 {
+			writeSimpleString(conn, arr[1].(string))
 			} else {
 				writeSimpleString(conn, "PONG")
 			}
-
+			
 		case "ECHO":
 			if len(arr) != 2 {
 				writeError(conn, "wrong number of arguments for 'echo'")
 				return
 			}
 			writeBulkString(conn, arr[1].(string))
-
+			
 		case "SET":
 			handleSet(conn, arr)
-
+			
 		case "GET":
 			handleGet(conn, arr)
-
+			
 		case "RPUSH":
 			handlePush(conn, arr, false)
-
+			
 		case "LPUSH":
 			handlePush(conn, arr, true)
-
+			
 		case "LLEN":
 			handleLLen(conn, arr)
-
+			
 		case "LRANGE":
 			handleLRange(conn, arr)
-
+			
 		case "LPOP":
 			handleLPop(conn, arr)
-
+			
 		case "BLPOP":
 			handleBLPop(conn, arr)
-		
+			
 		case "SUBSCRIBE":
 			handleSubscribe(conn, arr)
-
+			
 		case "PUBLISH":
 			handlePublish(conn, arr)
-		
+			
 		case "INCR":
 			handleIncr(conn, arr)
-
+			
 		case "MULTI":
 			handleMulti(conn, arr)
-
+			
 		case "EXEC":
 			writeError(conn, "EXEC without MULTI")
-
+		
+		case "DISCARD":
+			writeError(conn, "DISCARD without MULTI")
 		default:
 			writeError(conn, fmt.Sprintf("unknown command '%s'", cmd))
+		}
 	}
+	
+func handleDiscard(conn net.Conn, arr []interface{}) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	if !multiMode[conn] {
+		writeError(conn, "DISCARD without MULTI")
+		return
+	}
+
+	multiMode[conn] = false
+	delete(multiQueue, conn)
+
+	writeSimpleString(conn, "OK")
 }
 
 func handleExec(conn net.Conn, arr []interface{}) {
-
+		
 	mu.RLock()
 	q, ok := multiQueue[conn]
+
 	if !ok {
 		mu.Unlock()
 		writeError(conn, "EXEC without MULTI")
@@ -239,7 +261,6 @@ func handleQueue(conn net.Conn, arr []interface{}) {
 		args: args,
 	})
 	mu.Unlock()
-
 
 	writeSimpleString(conn, "QUEUED")
 }

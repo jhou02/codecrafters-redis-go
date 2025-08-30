@@ -24,6 +24,8 @@ var (
 	subscriptions = make(map[net.Conn]map[string]struct{})
 	subscribed    = make(map[net.Conn]bool)
 	multiMode = make(map[net.Conn]bool)
+	multiQueue = make(map[net.Conn][]queuedCmd)
+
 )
 
 type ValueType int
@@ -38,6 +40,11 @@ type entry struct {
 	strVal    string
 	listVal   *list.List
 	expiresAt time.Time
+}
+
+type queuedCmd struct {
+	name string
+	args []interface{}
 }
 
 func main() {
@@ -86,33 +93,45 @@ func handleConnection(conn net.Conn) {
 
 		if inMultiMode {
 			switch cmd {
-			case "EXEC":
-				handleExec(conn, arr)
-				continue
-			default:
-				handleQueue(conn, arr)
-				continue
+				case "EXEC":
+					handleExec(conn, arr)
+					continue
+				default:
+					handleQueue(conn, arr)
+					continue
 			}
 		}
 
 		if inSubscribedMode {
 			switch cmd {
-			case "SUBSCRIBE":
-				handleSubscribe(conn, arr)
-				continue
-			case "UNSUBSCRIBE":
-				handleUnsubscribe(conn, arr)
-				continue
-			case "PING":
-				writeArray(conn, []interface{}{"pong", ""})
-				continue
-			default:
-				writeError(conn, fmt.Sprintf("can't execute '%s' in subscribed mode", strings.ToLower(cmd)))
-				continue
+				case "SUBSCRIBE":
+					handleSubscribe(conn, arr)
+					continue
+				case "UNSUBSCRIBE":
+					handleUnsubscribe(conn, arr)
+					continue
+				case "PING":
+					writeArray(conn, []interface{}{"pong", ""})
+					continue
+				default:
+					writeError(conn, fmt.Sprintf("can't execute '%s' in subscribed mode", strings.ToLower(cmd)))
+					continue
 			}
 		}
 
-		switch cmd {
+		dispatchCommand(conn, arr)
+	}
+}
+
+func dispatchCommand(conn net.Conn, arr []interface{}) {
+	if len(arr) == 0 {
+		writeError(conn, "empty command")
+		return
+	}
+
+	cmd := strings.ToUpper(arr[0].(string))
+
+	switch cmd {
 		case "PING":
 			if len(arr) == 2 {
 				writeSimpleString(conn, arr[1].(string))
@@ -123,7 +142,7 @@ func handleConnection(conn net.Conn) {
 		case "ECHO":
 			if len(arr) != 2 {
 				writeError(conn, "wrong number of arguments for 'echo'")
-				continue
+				return
 			}
 			writeBulkString(conn, arr[1].(string))
 
@@ -165,29 +184,73 @@ func handleConnection(conn net.Conn) {
 
 		case "EXEC":
 			writeError(conn, "EXEC without MULTI")
+
 		default:
 			writeError(conn, fmt.Sprintf("unknown command '%s'", cmd))
-		}
 	}
 }
 
 func handleExec(conn net.Conn, arr []interface{}) {
-	mu.Lock()
-	multiMode[conn] = false
-	mu.Unlock()
 
-	writeArray(conn, []interface{}{})
+	mu.RLock()
+	q, ok := multiQueue[conn]
+	if !ok {
+		mu.Unlock()
+		writeError(conn, "EXEC without MULTI")
+		return
+	}
+	delete(multiQueue, conn)
+	multiMode[conn] = false
+	mu.RUnlock()
+
+
+	results := make([]interface{}, len(q))
+
+	for i, cmd := range q {
+		fullCmd := append([]interface{}{cmd.name}, cmd.args...)
+
+		readerPipe, writerPipe := net.Pipe()
+
+		go func() {
+
+			defer writerPipe.Close()
+			dispatchCommand(writerPipe, fullCmd)
+		}()
+
+		parsedResponse, err := ParseRESP(bufio.NewReader(readerPipe))
+		if err != nil {
+			results[i] = fmt.Errorf("internal error executing '%s': %v", cmd.name, err)
+		} else {
+			results[i] = parsedResponse
+		}
+	}
+
+	writeArray(conn, results)
 }
 
 func handleQueue(conn net.Conn, arr []interface{}) {
+
+	cmdName, _ := arr[0].(string)
+	args := arr[1:]
+
+	mu.Lock()
+	multiQueue[conn] = append(multiQueue[conn], queuedCmd{
+		name: cmdName,
+		args: args,
+	})
+	mu.Unlock()
+
+
 	writeSimpleString(conn, "QUEUED")
 }
 
 func handleMulti(conn net.Conn, arr []interface{}) {
-	
 	mu.Lock()
+	defer mu.Unlock()
+
 	multiMode[conn] = true
-	mu.Unlock()
+
+	multiQueue[conn] = []queuedCmd{}
 
 	writeSimpleString(conn, "OK")
 }
@@ -577,7 +640,7 @@ func handleBLPop(conn net.Conn, arr []interface{}) {
 		cond.Wait()
 
 		if timedOut {
-			writeNullBulk(conn)
+			writeNullArray(conn)
 			return
 		}
 	}
@@ -667,24 +730,30 @@ func writeInteger(w io.Writer, n int) {
 }
 
 func writeArray(conn net.Conn, arr []interface{}) {
-    fmt.Fprintf(conn, "*%d\r\n", len(arr))
-    for _, elem := range arr {
-        switch v := elem.(type) {
-        case string:
-            writeBulkString(conn, v)
-        case int:
-            writeInteger(conn, v)
-        case []byte:
-            writeBulkString(conn, string(v))
-        case nil:
-            fmt.Fprintf(conn, "$-1\r\n") // RESP null bulk string
-        default:
-            // fallback: encode as bulk string
-            writeBulkString(conn, fmt.Sprintf("%v", v))
-        }
-    }
+	fmt.Fprintf(conn, "*%d\r\n", len(arr))
+	for _, elem := range arr {
+		switch v := elem.(type) {
+		case string:
+			writeBulkString(conn, v)
+		case int:
+			writeInteger(conn, v)
+		case int64:
+			writeInteger(conn, int(v))
+		case []byte:
+			writeBulkString(conn, string(v))
+		case error:
+			fmt.Fprintf(conn, "-%s\r\n", v.Error())
+		case nil:
+			fmt.Fprintf(conn, "$-1\r\n") 
+		default:
+			writeBulkString(conn, fmt.Sprintf("%v", v))
+		}
+	}
 }
 
+func writeNullArray(w io.Writer) {
+	w.Write([]byte("*-1\r\n"))
+}
 
 func writeNullBulk(w io.Writer) {
 	w.Write([]byte("$-1\r\n"))

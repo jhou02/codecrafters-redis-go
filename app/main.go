@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"container/list"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -25,7 +26,7 @@ var (
 	subscribed    = make(map[net.Conn]bool)
 	multiMode = make(map[net.Conn]bool)
 	multiQueue = make(map[net.Conn][]queuedCmd)
-
+	config = make(map[string]string)
 )
 
 type ValueType int
@@ -48,6 +49,13 @@ type queuedCmd struct {
 }
 
 func main() {
+	dir := flag.String("dir", ".", "The directory where RDB files are stored")
+	dbfilename := flag.String("dbfilename", "dump.rdb", "The name of the RDB file")
+	flag.Parse()
+
+	config["dir"] = *dir
+	config["dbfilename"] = *dbfilename
+
 	ln, err := net.Listen("tcp", ":6379")
 	if err != nil {
 		panic(err)
@@ -191,11 +199,44 @@ func dispatchCommand(conn net.Conn, arr []interface{}) {
 		
 		case "DISCARD":
 			writeError(conn, "DISCARD without MULTI")
+
+		case "CONFIG":
+			handleConfig(conn, arr)
+			
 		default:
 			writeError(conn, fmt.Sprintf("unknown command '%s'", cmd))
-		}
 	}
-	
+}
+
+func handleConfig(conn net.Conn, arr []interface{}) {
+	if len(arr) < 3 {
+		writeError(conn, "wrong number of arguments for 'config' command")
+		return
+	}
+
+	subcommand := strings.ToUpper(arr[1].(string))
+	if subcommand != "GET" {
+		writeError(conn, fmt.Sprintf("Unsupported CONFIG subcommand: %s", arr[1].(string)))
+		return
+	}
+
+	key := arr[2].(string)
+
+	// Look up the value in our global config map
+	mu.RLock()
+	value, ok := config[key]
+	mu.RUnlock()
+
+	if !ok {
+		// Redis returns an empty array for unknown config parameters
+		writeArray(conn, []interface{}{})
+		return
+	}
+
+	// Respond with a RESP array: [key, value]
+	writeArray(conn, []interface{}{key, value})
+}
+
 func handleDiscard(conn net.Conn, arr []interface{}) {
 	mu.Lock()
 	defer mu.Unlock()

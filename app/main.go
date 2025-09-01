@@ -144,12 +144,12 @@ func dispatchCommand(conn net.Conn, arr []interface{}) {
 	cmd := strings.ToUpper(arr[0].(string))
 	
 	switch cmd {
-	case "PING":
-		if len(arr) == 2 {
-			writeSimpleString(conn, arr[1].(string))
-			} else {
-				writeSimpleString(conn, "PONG")
-			}
+		case "PING":
+			if len(arr) == 2 {
+				writeSimpleString(conn, arr[1].(string))
+				} else {
+					writeSimpleString(conn, "PONG")
+				}
 			
 		case "ECHO":
 			if len(arr) != 2 {
@@ -202,7 +202,7 @@ func dispatchCommand(conn net.Conn, arr []interface{}) {
 
 		case "CONFIG":
 			handleConfig(conn, arr)
-			
+
 		default:
 			writeError(conn, fmt.Sprintf("unknown command '%s'", cmd))
 	}
@@ -221,19 +221,15 @@ func handleConfig(conn net.Conn, arr []interface{}) {
 	}
 
 	key := arr[2].(string)
-
-	// Look up the value in our global config map
 	mu.RLock()
 	value, ok := config[key]
 	mu.RUnlock()
 
 	if !ok {
-		// Redis returns an empty array for unknown config parameters
 		writeArray(conn, []interface{}{})
 		return
 	}
 
-	// Respond with a RESP array: [key, value]
 	writeArray(conn, []interface{}{key, value})
 }
 
